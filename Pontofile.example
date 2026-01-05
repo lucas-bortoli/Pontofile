@@ -1,0 +1,15 @@
+# Inicializa o banco de horas com um saldo
+BANCO       -09:52
+
+# Diretiva "PONTO": Marcação de ponto.
+DATA         2026-01-05
+PONTO        07:21 16:10
+
+# Diretiva "DAYOFF": debita 8hrs do banco de horas
+DATA         2026-01-06
+DAYOFF
+
+# Diretiva "PONTO" sem hora de término: irá printar o horário esperado de saída
+DATA         2026-01-07
+PONTO        07:21
+

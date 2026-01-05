@@ -1,0 +1,175 @@
+import chalk from "chalk";
+import fs from "node:fs";
+import path from "node:path";
+import * as v from "valibot";
+
+type Day = { year: number; month: number; day: number };
+type Minutes = number & { _tag?: "MinutesUnit" };
+
+const filePath = path.join(import.meta.dirname, "Pontofile");
+const lines = fs
+  .readFileSync(filePath, { encoding: "utf-8" })
+  .split(/\r?\n|\r|\n/g)
+  .map((line) => line.trim());
+
+const removeAccents = (s: string) =>
+  s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+const readDate = (s: string): Day => {
+  const [year, month, day] = s.split("-").map((s) => parseInt(s));
+  return { year, month, day };
+};
+
+const readHhMm = (s: string): Minutes => {
+  const isNegative = s.charAt(0) === "-";
+  if (isNegative) s = s.slice(1);
+  const [strHours, strMinutes] = s.split(":");
+  const total: Minutes = parseInt(strHours) * 60 + parseInt(strMinutes);
+
+  return isNegative ? -total : total;
+};
+
+const printDay = ({ day, month, year }: Day) =>
+  `${year.toString().padStart(4, "0")}-${month
+    .toString()
+    .padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+
+const printMinutes = (s: Minutes) => {
+  const h = Math.floor(Math.abs(s) / 60);
+  const m = Math.abs(s) % 60;
+  return s < 0
+    ? `-${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`
+    : `+${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
+};
+
+const SchemaTime = v.message(
+  v.pipe(v.string(), v.regex(/^\-?\d+:\d+$/), v.transform(readHhMm)),
+  "Unable to parse time (HH:MM, may be negative)."
+);
+
+const SchemaDate = v.message(
+  v.pipe(v.string(), v.regex(/^\d\d\d\d-\d\d-\d\d$/), v.transform(readDate)),
+  "Unable to parse date (YYYY-MM-DD)."
+);
+
+const WORKDAY = (8 * 60) as Minutes; // 8hrs/day
+const LUNCH = 60 as Minutes;
+
+let state = {
+  operatingDay: null as Day | null,
+  operatingDayBankDelta: 0 as Minutes,
+  minutesBank: 0 as Minutes,
+
+  accumulatorTimeInOffice: 0 as Minutes,
+  accumulatorDaysOff: 0,
+};
+
+console.log();
+console.log("Pontofile");
+console.log("(c) 2026 Lucas Bortoli");
+console.log();
+
+for (const line of lines) {
+  if (line.trimStart().startsWith("#")) continue; // comentário
+  if (line.trim().length === 0) continue; // linha vazia
+
+  const [command, ...args] = line.split(" ").filter((s) => s.length);
+
+  switch (removeAccents(command.toUpperCase())) {
+    case "BANCO": {
+      const [time] = v.parse(v.tuple([SchemaTime]), args);
+      // prettier-ignore
+      console.log(`Banco Inicial   |  ------------------------  |  Bh Tot. ${printMinutes(time)}`);
+      state.minutesBank = time;
+      break;
+    }
+    case "DATA": {
+      const [date] = v.parse(v.tuple([SchemaDate]), args);
+      state.operatingDay = date;
+      state.operatingDayBankDelta = 0;
+      break;
+    }
+    case "PONTO": {
+      if (state.operatingDay === null) {
+        throw new Error("Operação PONTO requer um dia operante (use DATA)");
+      }
+
+      const [clockIn, clockOut] = v.parse(
+        v.tuple([SchemaTime, v.optional(SchemaTime)]),
+        args
+      );
+
+      if (clockOut) {
+        // dia completo
+        const timeInOffice = clockOut - clockIn;
+        let bankDelta: Minutes = 0;
+        if (Math.abs(WORKDAY + LUNCH - timeInOffice) > 10) {
+          bankDelta = timeInOffice - (WORKDAY + LUNCH);
+        }
+
+        state.operatingDayBankDelta = bankDelta;
+        state.minutesBank += bankDelta;
+        state.accumulatorTimeInOffice = timeInOffice;
+
+        // prettier-ignore
+        let endMarkerStr = `${printMinutes(clockOut).replace('+','')} (T ${printMinutes(timeInOffice).replace("+", "")})`;
+        if (timeInOffice > 11 * 60) {
+          endMarkerStr = chalk.red(endMarkerStr);
+        }
+
+        // prettier-ignore
+        console.log(`Dia ${printDay(state.operatingDay)}  |  ${printMinutes(clockIn).replace('+','')} -> ${endMarkerStr}  |  Bh Tot. ${printMinutes(state.minutesBank)}  ${state.operatingDayBankDelta ? `BhΔ ${printMinutes(state.operatingDayBankDelta)}` : ""}`);
+      } else {
+        // ainda não saímos
+        const expectedClockout = clockIn + WORKDAY + LUNCH;
+
+        // prettier-ignore
+        const endMarkerStr = `${chalk.italic.grey(`${printMinutes(expectedClockout).replace('+','')} (T ${printMinutes(WORKDAY).replace('+', '')})`)}`
+
+        // prettier-ignore
+        console.log(`Dia ${printDay(state.operatingDay)}  |  ${printMinutes(clockIn).replace('+','')} -> ${endMarkerStr}  |  Bh Tot. ${printMinutes(state.minutesBank)}`);
+      }
+
+      break;
+    }
+    case "DAYOFF": {
+      if (state.operatingDay === null) {
+        throw new Error("Operação DAYOFF requer um dia operante (use DATA)");
+      }
+
+      state.operatingDayBankDelta = -WORKDAY;
+      state.minutesBank += -WORKDAY;
+      state.accumulatorDaysOff++;
+
+      // prettier-ignore
+      console.log(`Dia ${printDay(state.operatingDay)}  |  Dia off                   |  Bh Tot. ${printMinutes(state.minutesBank)}  BhΔ ${printMinutes(state.operatingDayBankDelta)}`);
+      break;
+    }
+    case "BANCOZERO": {
+      if (state.operatingDay === null) {
+        // prettier-ignore
+        throw new Error("Operação BANCOZERO requer um dia operante (use DATA)");
+      }
+
+      if (state.minutesBank !== 0) {
+        // prettier-ignore
+        console.log(`Dia ${printDay(state.operatingDay)}  |  ----- Zerar Banco! -----  |  Bh Tot. ${chalk.red(printMinutes(state.minutesBank))}`);
+      } else {
+        // prettier-ignore
+        console.log(`Dia ${printDay(state.operatingDay)}  |  ----- Zerar Banco! -----  |  Bh Tot. ${chalk.green(printMinutes(state.minutesBank))}`);
+      }
+      break;
+    }
+    default:
+      throw new Error(`Comando desconhecido: ${command}`);
+  }
+}
+
+console.log();
+// prettier-ignore
+console.log(`Banco de Horas .......... : ${printMinutes(state.minutesBank)}`);
+// prettier-ignore
+console.log(`Dias off ................ :  ${state.accumulatorDaysOff.toString().padStart(2, " ")}`);
+// prettier-ignore
+console.log(`Tempo total no escritório :  ${printMinutes(state.accumulatorTimeInOffice).replace("+", "")}`);
+console.log();
