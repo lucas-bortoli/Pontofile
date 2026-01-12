@@ -12,8 +12,7 @@ const lines = fs
   .split(/\r?\n|\r|\n/g)
   .map((line) => line.trim());
 
-const removeAccents = (s: string) =>
-  s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+const removeAccents = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
 const readDate = (s: string): Day => {
   const [year, month, day] = s.split("-").map((s) => parseInt(s));
@@ -30,9 +29,9 @@ const readHhMm = (s: string): Minutes => {
 };
 
 const printDay = ({ day, month, year }: Day) =>
-  `${year.toString().padStart(4, "0")}-${month
+  `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day
     .toString()
-    .padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+    .padStart(2, "0")}`;
 
 const printMinutes = (s: Minutes) => {
   const h = Math.floor(Math.abs(s) / 60);
@@ -57,11 +56,38 @@ const LUNCH = 60 as Minutes;
 
 let state = {
   operatingDay: null as Day | null,
-  operatingDayBankDelta: 0 as Minutes,
+  operatingDayFirstClockIn: null as Minutes | null,
+  operatingDayTimeInOffice: 0 as Minutes,
   minutesBank: 0 as Minutes,
 
   accumulatorTimeInOffice: 0 as Minutes,
   accumulatorDaysOff: 0,
+};
+
+const commitCurrentDay = () => {
+  if (!state.operatingDay) return;
+
+  // dia completo
+  let bankDelta: Minutes = 0;
+  if (Math.abs(WORKDAY + LUNCH - state.operatingDayTimeInOffice) > 10) {
+    bankDelta = state.operatingDayTimeInOffice - (WORKDAY + LUNCH);
+  }
+
+  state.minutesBank += bankDelta;
+  state.accumulatorTimeInOffice += state.operatingDayTimeInOffice;
+
+  if (state.operatingDayFirstClockIn !== null) {
+    const clockIn = state.operatingDayFirstClockIn;
+    const fakedClockOut = clockIn + state.operatingDayTimeInOffice;
+
+    // prettier-ignore
+    console.log(`   ${chalk.underline("Ponto Final")}  |  ${printMinutes(clockIn).replace('+','')} -> ${printMinutes(fakedClockOut).replace('+','')} (T ${printMinutes(state.operatingDayTimeInOffice).replace("+", "")})  |  ${bankDelta ? `BhΔ ${printMinutes(bankDelta)}  ` : "            "}Bh Tot. ${printMinutes(state.minutesBank)}`);
+  } else {
+    // prettier-ignore
+    console.log(`   ${chalk.underline("Ponto Final")}  |  ------------------------  |  ${bankDelta ? `BhΔ ${printMinutes(bankDelta)}` : ""}  Bh Tot. ${printMinutes(state.minutesBank)}`);
+  }
+
+  console.log();
 };
 
 console.log();
@@ -78,15 +104,20 @@ for (const line of lines) {
   switch (removeAccents(command.toUpperCase())) {
     case "BANCO": {
       const [time] = v.parse(v.tuple([SchemaTime]), args);
-      // prettier-ignore
-      console.log(`Banco Inicial   |  ------------------------  |  Bh Tot. ${printMinutes(time)}`);
       state.minutesBank = time;
       break;
     }
     case "DATA": {
+      commitCurrentDay();
+
       const [date] = v.parse(v.tuple([SchemaDate]), args);
       state.operatingDay = date;
-      state.operatingDayBankDelta = 0;
+      state.operatingDayFirstClockIn = null;
+      state.operatingDayTimeInOffice = 0;
+
+      // prettier-ignore
+      console.log(`Dia ${printDay(state.operatingDay)}  |  ------------------------  |  `);
+
       break;
     }
     case "PONTO": {
@@ -94,41 +125,36 @@ for (const line of lines) {
         throw new Error("Operação PONTO requer um dia operante (use DATA)");
       }
 
-      const [clockIn, clockOut] = v.parse(
-        v.tuple([SchemaTime, v.optional(SchemaTime)]),
-        args
-      );
+      const [clockIn, clockOut] = v.parse(v.tuple([SchemaTime, SchemaTime]), args);
 
-      if (clockOut) {
-        // dia completo
-        const timeInOffice = clockOut - clockIn;
-        let bankDelta: Minutes = 0;
-        if (Math.abs(WORKDAY + LUNCH - timeInOffice) > 10) {
-          bankDelta = timeInOffice - (WORKDAY + LUNCH);
-        }
-
-        state.operatingDayBankDelta = bankDelta;
-        state.minutesBank += bankDelta;
-        state.accumulatorTimeInOffice = timeInOffice;
-
-        // prettier-ignore
-        let endMarkerStr = `${printMinutes(clockOut).replace('+','')} (T ${printMinutes(timeInOffice).replace("+", "")})`;
-        if (timeInOffice > 11 * 60) {
-          endMarkerStr = chalk.red(endMarkerStr);
-        }
-
-        // prettier-ignore
-        console.log(`Dia ${printDay(state.operatingDay)}  |  ${printMinutes(clockIn).replace('+','')} -> ${endMarkerStr}  |  Bh Tot. ${printMinutes(state.minutesBank)}  ${state.operatingDayBankDelta ? `BhΔ ${printMinutes(state.operatingDayBankDelta)}` : ""}`);
-      } else {
-        // ainda não saímos
-        const expectedClockout = clockIn + WORKDAY + LUNCH;
-
-        // prettier-ignore
-        const endMarkerStr = `${chalk.italic.grey(`${printMinutes(expectedClockout).replace('+','')} (T ${printMinutes(WORKDAY).replace('+', '')})`)}`
-
-        // prettier-ignore
-        console.log(`Dia ${printDay(state.operatingDay)}  |  ${printMinutes(clockIn).replace('+','')} -> ${endMarkerStr}  |  Bh Tot. ${printMinutes(state.minutesBank)}`);
+      const timeInOffice = clockOut - clockIn;
+      state.operatingDayTimeInOffice += timeInOffice;
+      if (state.operatingDayFirstClockIn === null) {
+        state.operatingDayFirstClockIn = clockIn;
       }
+
+      // prettier-ignore
+      console.log(`         Ponto  |  ${printMinutes(clockIn).replace('+','')} -> ${printMinutes(clockOut).replace('+','')} (T ${printMinutes(timeInOffice).replace("+", "")})  |  `);
+
+      break;
+    }
+    case "ESTIMATE": {
+      if (state.operatingDay === null) {
+        throw new Error("Operação ESTIMATE requer um dia operante (use DATA)");
+      }
+
+      const [clockIn] = v.parse(v.tuple([SchemaTime]), args);
+      const remainingTime = Math.max(WORKDAY + LUNCH - state.operatingDayTimeInOffice, 0);
+      const expectedClockout = clockIn + remainingTime;
+
+      // prettier-ignore
+      const endMarkerStr = `${chalk.italic.grey(`${printMinutes(expectedClockout).replace('+','')} (T ${printMinutes(remainingTime).replace('+', '')})`)}`
+      // prettier-ignore
+      console.log(`    Estimativa  |  ${printMinutes(clockIn).replace('+','')} -> ${endMarkerStr}  |  `);
+
+      state.operatingDayFirstClockIn = clockIn;
+      state.operatingDayTimeInOffice += WORKDAY + LUNCH;
+      state.accumulatorTimeInOffice += WORKDAY + LUNCH;
 
       break;
     }
@@ -137,12 +163,11 @@ for (const line of lines) {
         throw new Error("Operação DAYOFF requer um dia operante (use DATA)");
       }
 
-      state.operatingDayBankDelta = -WORKDAY;
-      state.minutesBank += -WORKDAY;
       state.accumulatorDaysOff++;
 
       // prettier-ignore
-      console.log(`Dia ${printDay(state.operatingDay)}  |  Dia off                   |  Bh Tot. ${printMinutes(state.minutesBank)}  BhΔ ${printMinutes(state.operatingDayBankDelta)}`);
+      console.log(`                |  Dia off                   |  `);
+
       break;
     }
     case "BANCOZERO": {
@@ -165,11 +190,13 @@ for (const line of lines) {
   }
 }
 
+commitCurrentDay();
+
 console.log();
+// prettier-ignore
+console.log(`Tempo total no escritório :  ${printMinutes(state.accumulatorTimeInOffice).replace("+", "")}`);
 // prettier-ignore
 console.log(`Banco de Horas .......... : ${printMinutes(state.minutesBank)}`);
 // prettier-ignore
-console.log(`Dias off ................ :  ${state.accumulatorDaysOff.toString().padStart(2, " ")}`);
-// prettier-ignore
-console.log(`Tempo total no escritório :  ${printMinutes(state.accumulatorTimeInOffice).replace("+", "")}`);
+console.log(`Dias off ................ :  ${state.accumulatorDaysOff.toString().padStart(5, " ")}`);
 console.log();
